@@ -5,19 +5,21 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/mxk/go-imap/imap"
 	"gopkg.in/alecthomas/kingpin.v2"
 	"log"
 	"net"
 	"net/smtp"
 	"os"
 	"strings"
+	"time"
 )
 
 var (
 	reader = bufio.NewReader(os.Stdin)
 
-	startApp = kingpin.New("Mail smtpClient, based on console app", "Supported commands: [send]")
-	App = kingpin.New("Mail smtpClient, based on console app", "Supported commands: [send]")
+	startApp = kingpin.New("Mail smtpClient, based on console app", "")
+	App      = kingpin.New("Mail smtpClient, based on console app", "Supported commands: [send] [get] [exit]")
 
 	// Обязательные аргументы
 	Mail = startApp.Arg("addr", "Your mail box address").Required().String()
@@ -25,25 +27,30 @@ var (
 
 	Send = App.Command("send", "Send e-mail to chosen addresses")
 
-	// Список серверов
- 	Servers = []MailServer{
- 		{
- 			LocalizedName:"Yandex",
+	Get    = App.Command("get", "Get mail from your mailbox")
+	Unread = Get.Flag("unread", "Will get only unread messages").Default("false").Bool()
+	// Important = Get.Flag("important", "Will get only important messages").Default("false").Bool()
+	Count = Get.Flag("count", "Amout of loading messages").Default("100").Int()
 
-			Smtp:"smtp.yandex.ru:465",
-			Pop3:"pop.yandex.ru:995",
-			Imap:"imap.yandex.ru:993",
+	// Список серверов
+	Servers = []MailServer{
+		{
+			LocalizedName: "Yandex",
+
+			Smtp: "smtp.yandex.ru:465",
+			Pop3: "pop.yandex.ru:995",
+			Imap: "imap.yandex.ru:993",
 
 			Indexes: []string{
 				"yandex.ru",
 			},
 		},
 		{
-			LocalizedName:"Mail Ru",
+			LocalizedName: "Mail Ru",
 
-			Smtp:"smtp.mail.ru:465",
-			Pop3:"pop.mail.ru:995",
-			Imap:"imap.mail.ru:993",
+			Smtp: "smtp.mail.ru:465",
+			Pop3: "pop.mail.ru:995",
+			Imap: "imap.mail.ru:993",
 
 			Indexes: []string{
 				"mail.ru",
@@ -68,12 +75,10 @@ var (
 	}
 )
 
-
-
-func main()  {
+func main() {
 	// Парсим сначала аргументы
 	_, err := startApp.Parse(os.Args[1:])
-	if err != nil{
+	if err != nil {
 		log.Fatal(err)
 	}
 
@@ -83,32 +88,31 @@ func main()  {
 		line := readLineCarefully()
 
 		command, err := App.Parse(strings.Split(line, " "))
-		if err != nil{
+		if err != nil {
 			log.Println(err)
 			continue
 		}
 
-		if line == "exit"{
+		if line == "exit" {
 			return
 		}
 
 		switch command {
-			case Send.FullCommand():
-				sendMail()
-				break
+		case Send.FullCommand():
+			sendMail()
+			break
+
+		case Get.FullCommand():
+			getMessages()
+			break
 		}
 	}
 }
-
-
-
-
 
 ///////////////////////////////
 // CUSTOM TYPE
 ///////////////////////////////
 type MailServer struct {
-
 	// Список фрагментов адреса почты, идущих после "@"
 	// (example@mail.ru -> mail.ru)
 	Indexes []string
@@ -131,20 +135,20 @@ type MailServer struct {
 
 type Email struct {
 	// Наш адрес
-	sender  string
+	sender string
 
 	// кому пишем
-	to      []string
+	to []string
 
 	// Тема письма
 	subject string
 
 	// Тело сообщения
-	body    string
+	body string
 }
 
 // Генерирует тело сообщения
-func (email *Email) BuildMessage() [] byte {
+func (email *Email) BuildMessage() []byte {
 	enter := "\r\n"
 
 	message := ""
@@ -157,38 +161,32 @@ func (email *Email) BuildMessage() [] byte {
 	message += enter + email.body
 	message += enter + "."
 
-	return [] byte (message)
+	return []byte(message)
 }
-
-
-
-
 
 ///////////////////////////////
 // HELPING COMMANDS
 ///////////////////////////////
 
 // Ищет сервер по имени почты
-func findServer(addr string) (* MailServer, error) {
+func findServer(addr string) (*MailServer, error) {
 	index := strings.Index(addr, "@")
-	if index < 0{
+	if index < 0 {
 		return nil, errors.New("Address should contains \"@\"")
 	}
 
-	userSuffix := addr[index + 1 :]
+	userSuffix := addr[index+1:]
 
-	for _, server := range Servers  {
+	for _, server := range Servers {
 		for _, suffix := range server.Indexes {
-			if suffix == userSuffix{
+			if suffix == userSuffix {
 				return &server, nil
 			}
 		}
 	}
 
-	return nil,errors.New("Unresolver email address")
+	return nil, errors.New("Unresolver email address")
 }
-
-
 
 ////////////////////////////////
 // COMMAND HANDLERS
@@ -199,50 +197,49 @@ func sendMail() {
 
 	// Нашёл сервер по адресу почты
 	server, err := findServer(*Mail)
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// Выцепил хост из адреса сервера
 	host, _, err := net.SplitHostPort(server.Smtp)
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// TLS config
-	config := &tls.Config {
+	config := &tls.Config{
 		InsecureSkipVerify: true,
-		ServerName: host,
+		ServerName:         host,
 	}
 
 	// Создал TLS соедлинение
 	conn, err := tls.Dial("tcp", server.Smtp, config)
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// Подключился к SMTP серверу
 	client, err := smtp.NewClient(conn, host)
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// Авторизовался
-	err = client.Auth(smtp.PlainAuth("",*Mail, *Pass, host))
-	if err != nil{
+	err = client.Auth(smtp.PlainAuth("", *Mail, *Pass, host))
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// Формируем тело сообщения
-	mail := Email{}
-
-	log.Println("Enter your name")
-	mail.sender = readLineCarefully()
+	mail := Email{
+		sender: *Mail,
+	}
 
 	log.Println("Enter e-mail addresses separated by \";\"")
 	mail.to = strings.Split(readLineCarefully(), ";")
@@ -253,29 +250,28 @@ func sendMail() {
 	log.Println("Enter one-line message")
 	mail.body = readLineCarefully()
 
-
 	err = client.Mail(*Mail)
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	for _, addr := range mail.to{
+	for _, addr := range mail.to {
 		err = client.Rcpt(addr)
-		if err != nil{
+		if err != nil {
 			log.Println(err)
 			return
 		}
 	}
 
 	writer, err := client.Data()
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	_, err = writer.Write(mail.BuildMessage())
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return
 	}
@@ -283,15 +279,70 @@ func sendMail() {
 	log.Println(client.Quit())
 }
 
+// Получаю список сообщений
+func getMessages() {
+	// Нашёл сервер по адресу почты
+	server, err := findServer(*Mail)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// Выцепил хост из адреса сервера
+	host, _, err := net.SplitHostPort(server.Imap)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	// TLS config
+	config := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	}
+
+	// Создал TLS соедлинение
+	conn, err := tls.Dial("tcp", server.Imap, config)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	client, err := imap.NewClient(conn, server.Imap, time.Second*5)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	cmd, err := client.Login(*Mail, *Pass)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	cmd, err = cmd.Client().Select("INBOX", false)
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	search := []string{"ALL"}
+
+	if *Unread {
+		search = append(search, "UNSEEN")
+	}
+
+	client = cmd.Client()
+
+}
+
 // Считываю строку до энтера, исключая его
-func readLineCarefully() string{
+func readLineCarefully() string {
 	line, err := reader.ReadString('\n')
-	if err != nil{
+	if err != nil {
 		log.Println(err)
 		return ""
 	}
 
-	return line[:len(line) - 1]
+	return line[:len(line)-1]
 }
-
-
