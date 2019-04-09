@@ -13,10 +13,14 @@ import (
 	"os"
 	"strings"
 	"time"
+	"net/mail"
+	"bytes"
 )
 
 var (
 	reader = bufio.NewReader(os.Stdin)
+	// к какому серверу почты будем подрубаться
+	currentMailServer *MailServer
 
 	startApp = kingpin.New("Mail smtpClient, based on console app", "")
 	App      = kingpin.New("Mail smtpClient, based on console app", "Supported commands: [send] [get] [exit]")
@@ -29,8 +33,7 @@ var (
 
 	Get    = App.Command("get", "Get mail from your mailbox")
 	Unread = Get.Flag("unread", "Will get only unread messages").Default("false").Bool()
-	// Important = Get.Flag("important", "Will get only important messages").Default("false").Bool()
-	Count = Get.Flag("count", "Amout of loading messages").Default("100").Int()
+	Count  = Get.Flag("count", "Amout of loading messages").Default("15").Uint32()
 
 	// Список серверов
 	Servers = []MailServer{
@@ -78,6 +81,12 @@ var (
 func main() {
 	// Парсим сначала аргументы
 	_, err := startApp.Parse(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Ищем сервер
+	currentMailServer, err = findServer(*Mail)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -195,28 +204,7 @@ func findServer(addr string) (*MailServer, error) {
 // Отправляю почту
 func sendMail() {
 
-	// Нашёл сервер по адресу почты
-	server, err := findServer(*Mail)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	// Выцепил хост из адреса сервера
-	host, _, err := net.SplitHostPort(server.Smtp)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	// TLS config
-	config := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         host,
-	}
-
-	// Создал TLS соедлинение
-	conn, err := tls.Dial("tcp", server.Smtp, config)
+	conn, host, err := createTLSConn(currentMailServer.Smtp)
 	if err != nil {
 		log.Println(err)
 		return
@@ -281,34 +269,14 @@ func sendMail() {
 
 // Получаю список сообщений
 func getMessages() {
-	// Нашёл сервер по адресу почты
-	server, err := findServer(*Mail)
+
+	conn, host, err := createTLSConn(currentMailServer.Imap)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	// Выцепил хост из адреса сервера
-	host, _, err := net.SplitHostPort(server.Imap)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	// TLS config
-	config := &tls.Config{
-		InsecureSkipVerify: true,
-		ServerName:         host,
-	}
-
-	// Создал TLS соедлинение
-	conn, err := tls.Dial("tcp", server.Imap, config)
-	if err != nil {
-		log.Println(err)
-		return
-	}
-
-	client, err := imap.NewClient(conn, server.Imap, time.Second*5)
+	client, err := imap.NewClient(conn, host, time.Second*5)
 	if err != nil {
 		log.Println(err)
 		return
@@ -326,13 +294,43 @@ func getMessages() {
 		return
 	}
 
-	search := []string{"ALL"}
+	// client = cmd.Client()
 
-	if *Unread {
-		search = append(search, "UNSEEN")
+	// Ограничили кол-во загружаемой почты
+	set, _ := imap.NewSeqSet("")
+	if client.Mailbox.Messages >= *Count {
+		set.AddRange(client.Mailbox.Messages + 1 - *Count, client.Mailbox.Messages)
+	} else {
+		set.Add("1:*")
 	}
 
-	client = cmd.Client()
+	cmd, _ = client.Fetch(set, "RFC822.HEADER")
+
+	for cmd.InProgress() {
+
+		// убираем таймаут
+		client.Recv(-1)
+
+		for _, resp := range client.Data {
+			if resp.MessageInfo() != nil {
+
+				header := imap.AsBytes(resp.MessageInfo().Attrs["RFC822.HEADER"])
+
+				if msg, _ := mail.ReadMessage(bytes.NewReader(header)); msg != nil {
+
+					fmt.Println("|--", msg.Header.Get("Subject"))
+				}
+			}
+		}
+
+		cmd.Data = nil
+
+		for _, rsp := range client.Data {
+			fmt.Println("Server data:", rsp)
+		}
+
+		client.Data = nil
+	}
 
 }
 
@@ -345,4 +343,22 @@ func readLineCarefully() string {
 	}
 
 	return line[:len(line)-1]
+}
+
+// Создаем защищенное содинение с сервером
+func createTLSConn(addr string) (*tls.Conn, string, error) {
+	// Выцепил хост из адреса сервера
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, "", err
+	}
+
+	// TLS config
+	config := &tls.Config{
+		InsecureSkipVerify: true,
+		ServerName:         host,
+	}
+
+	conn, err := tls.Dial("tcp", addr, config)
+	return conn, host, err
 }
