@@ -349,8 +349,9 @@ func getMessages() {
 		if *Unread {
 			skip := false
 
+			// Пропускаю уже увиденные сообщения
 			for _, flag := range msg.Flags {
-				if flag == "Unseen" || flag == "Recent" {
+				if flag == "Seen" {
 					skip = true
 					break
 				}
