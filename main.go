@@ -34,7 +34,7 @@ var (
 
 	Get    = App.Command("get", "Get mail from your mailbox")
 	Unread = Get.Flag("unread", "Will get only unread messages").Default("true").Bool()
-	Count  = Get.Flag("count", "Amout of loading messages").Default("10").Uint32()
+	Count  = Get.Arg("count", "Amout of loading messages").Default("10").Uint32()
 
 	// Список серверов
 	Servers = []MailServer{
@@ -347,12 +347,12 @@ func getMessages() {
 		}
 
 		if *Unread {
-			skip := false
+			skip := true
 
 			// Пропускаю уже увиденные сообщения
 			for _, flag := range msg.Flags {
-				if flag == "Seen" {
-					skip = true
+				if flag == "Recent" || flag == "Unseen" {
+					skip = false
 					break
 				}
 			}
