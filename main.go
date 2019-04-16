@@ -33,7 +33,7 @@ var (
 	Send = App.Command("send", "Send e-mail to chosen addresses")
 
 	Get    = App.Command("get", "Get mail from your mailbox")
-	Unread = Get.Flag("unread", "Will get only unread messages").Default("true").Bool()
+	Unread = Get.Flag("unread", "Will get only unread messages").Default("false").Bool()
 	Count  = Get.Arg("count", "Amout of loading messages").Default("10").Uint32()
 
 	// Список серверов
@@ -174,30 +174,6 @@ func (email *Email) BuildMessage() []byte {
 	return []byte(message)
 }
 
-///////////////////////////////
-// HELPING COMMANDS
-///////////////////////////////
-
-// Ищет сервер по имени почты
-func findServer(addr string) (*MailServer, error) {
-	index := strings.Index(addr, "@")
-	if index < 0 {
-		return nil, errors.New("Address should contains \"@\"")
-	}
-
-	userSuffix := addr[index+1:]
-
-	for _, server := range Servers {
-		for _, suffix := range server.Indexes {
-			if suffix == userSuffix {
-				return &server, nil
-			}
-		}
-	}
-
-	return nil, errors.New("Unresolver email address")
-}
-
 ////////////////////////////////
 // COMMAND HANDLERS
 ////////////////////////////////
@@ -212,60 +188,60 @@ func sendMail() {
 	}
 
 	// Подключился к SMTP серверу
-	client, err := smtp.NewClient(conn, host)
+	smtpClient, err := smtp.NewClient(conn, host)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// Авторизовался
-	err = client.Auth(smtp.PlainAuth("", *Mail, *Pass, host))
+	err = smtpClient.Auth(smtp.PlainAuth("", *Mail, *Pass, host))
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
 	// Формируем тело сообщения
-	mail := Email{
+	email := Email{
 		sender: *Mail,
 	}
 
-	log.Println("Enter e-mail addresses separated by \";\"")
-	mail.to = strings.Split(readLineCarefully(), ";")
+	log.Println("Enter e-email addresses separated by \";\"")
+	email.to = strings.Split(readLineCarefully(), ";")
 
-	log.Println("Enter subject of e-mail")
-	mail.subject = readLineCarefully()
+	log.Println("Enter subject of e-email")
+	email.subject = readLineCarefully()
 
 	log.Println("Enter one-line message")
-	mail.body = readLineCarefully()
+	email.body = readLineCarefully()
 
-	err = client.Mail(*Mail)
+	err = smtpClient.Mail(*Mail)
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	for _, addr := range mail.to {
-		err = client.Rcpt(addr)
+	for _, addr := range email.to {
+		err = smtpClient.Rcpt(addr)
 		if err != nil {
 			log.Println(err)
 			return
 		}
 	}
 
-	writer, err := client.Data()
+	writer, err := smtpClient.Data()
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	_, err = writer.Write(mail.BuildMessage())
+	_, err = writer.Write(email.BuildMessage())
 	if err != nil {
 		log.Println(err)
 		return
 	}
 
-	log.Println(client.Quit())
+	log.Println(smtpClient.Quit())
 }
 
 // Получаю список сообщений
@@ -311,104 +287,139 @@ func getMessages() {
 		return
 	}
 
-	// Если выставили флаг "только непрочитанные" и таких писем нет - выходим
-	//if *Unread && inbox.Recent == 0 && inbox.Unseen == 0 {
-	//	log.Println("No unread messages")
-	//	return
-	//}
+	// Создаём критерий запросы
+	criteria := imap.NewSearchCriteria()
+
+	if *Unread {
+		criteria.WithoutFlags = []string{"\\Seen"}
+	}
 
 	// Получаю последние эмейлы, по указанному кол-ву
+
 	from := uint32(1)
 	to := inbox.Messages
-	if to > *Count {
+	if to >= *Count {
 		from = inbox.Messages - *Count
 	}
 
-	for i := from; i <= to; i++ {
-		set := new(imap.SeqSet)
-		set.AddNum(i)
+	set := new(imap.SeqSet)
+	set.AddRange(from, to)
+	criteria.SeqNum = set
 
-		// Get the whole message body
-		section := &imap.BodySectionName{}
-		items := []imap.FetchItem{section.FetchItem(), imap.FetchFlags}
+	// Получаю уникальные UUID найденых писем
+	uids, err := imapClient.Search(criteria)
+	if err != nil {
+		log.Println(err)
+	}
 
-		messages := make(chan *imap.Message, 1)
-		go func() {
-			if err := imapClient.Fetch(set, items, messages); err != nil {
-				log.Println(err)
-				return
+	// Создаю список каналов для каждого сообщения
+	messages := make(chan *imap.Message, len(uids))
+	done = make(chan error, 1)
+
+	section := &imap.BodySectionName{}
+	items := []imap.FetchItem{imap.FetchEnvelope, imap.FetchFlags, imap.FetchInternalDate, section.FetchItem()}
+	seqset := new(imap.SeqSet)
+	seqset.AddNum(uids...)
+
+	go func() {
+		done <- imapClient.Fetch(seqset, items, messages)
+	}()
+
+	// Ожидаю окончания загрузки сообщений
+	err = <-done
+	if err != nil {
+		log.Println(err)
+		return
+	}
+
+	for msg := range messages {
+		printMessage(msg, section)
+	}
+}
+
+///////////////////////////////
+// HELPING METHODS
+///////////////////////////////
+
+// Ищет сервер по имени почты
+func findServer(addr string) (*MailServer, error) {
+	index := strings.Index(addr, "@")
+	if index < 0 {
+		return nil, errors.New("Address should contains \"@\"")
+	}
+
+	userSuffix := addr[index+1:]
+
+	for _, server := range Servers {
+		for _, suffix := range server.Indexes {
+			if suffix == userSuffix {
+				return &server, nil
 			}
-		}()
-
-		msg := <-messages
-		if msg == nil {
-			log.Println("Server didn't returned message")
-			return
 		}
+	}
 
-		if *Unread {
-			skip := true
+	return nil, errors.New("Unresolver email address")
+}
 
-			// Пропускаю уже увиденные сообщения
-			for _, flag := range msg.Flags {
-				if flag == "Recent" || flag == "Unseen" {
-					skip = false
-					break
-				}
-			}
+func printMessage(message *imap.Message, section *imap.BodySectionName) {
+	if message == nil {
+		log.Println("Message is nil")
+		return
+	}
 
-			if skip {
-				continue
-			}
-		}
+	body := message.GetBody(section)
+	if body == nil {
+		log.Println("Server didn't return message")
+		return
+	}
 
-		r := msg.GetBody(section)
-		if r == nil {
-			log.Println("Server didn't returned message")
-			return
-		}
+	reader, err := mail.CreateReader(body)
+	if err != nil {
+		log.Println(err)
+		return
+	}
 
-		// Create a new mail reader
-		reader, err := mail.CreateReader(r)
-		if err != nil {
-			log.Println(err)
-			return
-		}
+	// Print some info about the message
+	header := reader.Header
+	if date, err := header.Date(); err == nil {
+		fmt.Println("Date:", date)
+	}
+	if from, err := header.AddressList("From"); err == nil {
+		fmt.Println("From:", from)
+	}
+	if to, err := header.AddressList("To"); err == nil {
+		fmt.Println("To:", to)
+	}
+	if subject, err := header.Subject(); err == nil && subject != "" {
+		fmt.Println("Subject:", subject)
+	}
 
-		// Print some info about the message
-		header := reader.Header
-		if date, err := header.Date(); err == nil {
-			log.Println("Date:", date)
-		}
-		if from, err := header.AddressList("From"); err == nil {
-			log.Println("From:", from)
-		}
-		if to, err := header.AddressList("To"); err == nil {
-			log.Println("To:", to)
-		}
-		if subject, err := header.Subject(); err == nil {
-			log.Println("Subject:", subject)
-		}
-
-		// Process each message's part
-		for {
-			p, err := reader.NextPart()
-			if err == io.EOF {
-				break
-			} else if err != nil {
-				log.Fatal(err)
-			}
-
-			switch h := p.Header.(type) {
-			case mail.TextHeader:
+	for {
+		part, err := reader.NextPart()
+		switch err {
+		// Продолжаем читать сообщение
+		case nil:
+			switch h := part.Header.(type) {
+			case *mail.InlineHeader:
 				// This is the message's text (can be plain-text or HTML)
-				b, _ := ioutil.ReadAll(p.Body)
-				log.Println(string(b))
-			case mail.AttachmentHeader:
+				b, _ := ioutil.ReadAll(part.Body)
+				fmt.Println(string(b))
+			case *mail.AttachmentHeader:
 				// This is an attachment
 				filename, _ := h.Filename()
-				log.Println(filename)
+				fmt.Println(filename)
 			}
+
+			break
+
+		// Прочитали всё сообщений
+		case io.EOF:
+			return
+
+		// Наткнулись на ошибку
+		default:
+			log.Println(err)
+			return
 		}
 	}
 }
