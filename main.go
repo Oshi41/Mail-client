@@ -1,6 +1,7 @@
 package main
 
 import (
+	"./spec"
 	"bufio"
 	"crypto/tls"
 	"errors"
@@ -23,12 +24,12 @@ var (
 	// к какому серверу почты будем подрубаться
 	currentMailServer *MailServer
 
-	startApp = kingpin.New("Mail smtpClient, based on console app", "")
-	App      = kingpin.New("Mail smtpClient, based on console app", "Supported commands: [send] [get] [exit]")
+	// startApp = kingpin.New("Mail smtpClient, based on console app", "")
+	App = kingpin.New("Mail smtpClient, based on console app", "Supported commands: [send] [get] [exit]")
 
 	// Обязательные аргументы
-	Mail = startApp.Arg("addr", "Your mail box address").Required().String()
-	Pass = startApp.Arg("pass", "Your password").Required().String()
+	Mail *string
+	Pass *string
 
 	Send = App.Command("send", "Send e-mail to chosen addresses")
 
@@ -81,10 +82,13 @@ var (
 
 func main() {
 	// Парсим сначала аргументы
-	_, err := startApp.Parse(os.Args[1:])
+	email, pass, err := spec.Parse(os.Args[1:])
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	Mail = &email
+	Pass = &pass
 
 	// Ищем сервер
 	currentMailServer, err = findServer(*Mail)
