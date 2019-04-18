@@ -96,16 +96,17 @@ func main() {
 
 	for {
 		line := readLineCarefully()
+		
+		if line == "exit" {
+			log.Println("Closing the program")
+			return
+		}
 
 		command, err := App.Parse(strings.Split(line, " "))
 		if err != nil {
 			log.Println(err)
 			continue
-		}
-
-		if line == "exit" {
-			return
-		}
+		}		
 
 		switch command {
 		case Send.FullCommand():
